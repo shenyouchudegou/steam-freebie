@@ -205,6 +205,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Local scraper output
+steam_games.json
+steam_state.json
+
 # Ruff stuff:
 .ruff_cache/
 
