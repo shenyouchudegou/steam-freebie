@@ -1,0 +1,79 @@
+name: Process Subscription
+
+on:
+  discussion:
+    types: [created]
+
+concurrency:
+  group: subscription-processing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  discussions: write
+
+jobs:
+  process:
+    name: Process encrypted subscription request
+    if: github.event.discussion.category.name == 'Subscribe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Read encrypted subscriber variable
+        env:
+          GH_TOKEN: ${{ secrets.VARS_PAT }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "Missing secret: VARS_PAT"; exit 1; }
+          umask 077
+          gh variable get SUBSCRIBERS_ENC --repo "$GITHUB_REPOSITORY" > subscribers.enc
+
+      - name: Process request
+        id: subscription
+        env:
+          LIST_ENCRYPTION_KEY: ${{ secrets.LIST_ENCRYPTION_KEY }}
+          PGP_PRIVATE_KEY: ${{ secrets.PGP_PRIVATE_KEY }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+        run: |
+          gpg --version
+          python subscription.py process \
+            --event "$GITHUB_EVENT_PATH" \
+            --state subscribers.enc \
+            --output subscribers-updated.enc \
+            --response subscription-response.md
+
+      - name: Update encrypted subscriber variable
+        if: steps.subscription.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.VARS_PAT }}
+        run: gh variable set SUBSCRIBERS_ENC --repo "$GITHUB_REPOSITORY" < subscribers-updated.enc
+
+      - name: Reply without exposing subscriber data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCUSSION_ID: ${{ github.event.discussion.node_id }}
+        run: |
+          gh api graphql \
+            -f query='mutation($discussionId: ID!, $body: String!) { addDiscussionComment(input: {discussionId: $discussionId, body: $body}) { comment { id } } }' \
+            -F discussionId="$DISCUSSION_ID" \
+            -F body=@subscription-response.md > /dev/null
+
+      - name: Close processed discussion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCUSSION_ID: ${{ github.event.discussion.node_id }}
+        run: |
+          gh api graphql \
+            -f query='mutation($discussionId: ID!) { closeDiscussion(input: {discussionId: $discussionId, reason: RESOLVED}) { discussion { id } } }' \
+            -F discussionId="$DISCUSSION_ID" > /dev/null

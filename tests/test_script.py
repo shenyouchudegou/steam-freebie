@@ -1,8 +1,15 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from script import build_email, deduplicate, game_key, load_previous_keys, parse_games
+from script import (
+    build_email_content,
+    deduplicate,
+    game_key,
+    load_previous_keys,
+    parse_games,
+    send_notification,
+)
 
 
 SAMPLE_HTML = """
@@ -58,14 +65,6 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(len(deduplicate([game, game, dlc])), 2)
         self.assertEqual(game_key(game), "game:123")
 
-    @patch.dict(
-        os.environ,
-        {
-            "SMTP_USERNAME": "sender@example.com",
-            "MAIL_TO": "one@example.com,two@example.com",
-        },
-        clear=True,
-    )
     def test_email_contains_new_game(self) -> None:
         game = {
             "item_type": "game",
@@ -73,11 +72,32 @@ class ScriptTests(unittest.TestCase):
             "title": "Demo & Friends",
             "url": "https://example.com/game",
         }
-        message = build_email([game])
+        subject, text, html_body = build_email_content([game])
 
-        self.assertIn("今日新增 1 款", str(message["Subject"]))
-        self.assertEqual(message["To"], "one@example.com, two@example.com")
-        self.assertIn("Demo & Friends", message.get_body(preferencelist=("plain",)).get_content())
+        self.assertIn("今日新增 1 款", subject)
+        self.assertIn("Demo & Friends", text)
+        self.assertIn("Demo &amp; Friends", html_body)
+
+    @patch("script.requests.post")
+    @patch.dict(
+        os.environ,
+        {"RESEND_API_KEY": "re_test", "MAIL_FROM": "Steam <sender@example.com>"},
+        clear=True,
+    )
+    def test_resend_keeps_recipients_separate(self, post: Mock) -> None:
+        post.return_value.raise_for_status.return_value = None
+        game = {
+            "item_type": "game",
+            "appid": "123",
+            "title": "Demo",
+            "url": "https://example.com/game",
+        }
+
+        send_notification([game], ["one@example.com", "two@example.com"])
+
+        payload = __import__("json").loads(post.call_args.kwargs["data"])
+        self.assertEqual([item["to"] for item in payload], [["one@example.com"], ["two@example.com"]])
+        self.assertIn("Idempotency-Key", post.call_args.kwargs["headers"])
 
 
 if __name__ == "__main__":

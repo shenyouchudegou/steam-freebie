@@ -2,7 +2,7 @@ name: Steam Free Games Notifier
 
 on:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '47 10 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -35,34 +35,38 @@ jobs:
 
       - name: Validate configuration
         env:
-          GH_TOKEN: ${{ secrets.REPO_VARIABLE_TOKEN }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MAIL_TO: ${{ vars.MAIL_TO }}
+          GH_TOKEN: ${{ secrets.VARS_PAT }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          LIST_ENCRYPTION_KEY: ${{ secrets.LIST_ENCRYPTION_KEY }}
+          PGP_PRIVATE_KEY: ${{ secrets.PGP_PRIVATE_KEY }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
         run: |
-          test -n "$GH_TOKEN" || { echo "Missing secret: REPO_VARIABLE_TOKEN"; exit 1; }
-          test -n "$SMTP_HOST" || { echo "Missing secret: SMTP_HOST"; exit 1; }
-          test -n "$SMTP_USERNAME" || { echo "Missing secret: SMTP_USERNAME"; exit 1; }
-          test -n "$SMTP_PASSWORD" || { echo "Missing secret: SMTP_PASSWORD"; exit 1; }
-          test -n "$MAIL_TO" || { echo "Missing variable: MAIL_TO"; exit 1; }
+          test -n "$GH_TOKEN" || { echo "Missing secret: VARS_PAT"; exit 1; }
+          test -n "$RESEND_API_KEY" || { echo "Missing secret: RESEND_API_KEY"; exit 1; }
+          test -n "$LIST_ENCRYPTION_KEY" || { echo "Missing secret: LIST_ENCRYPTION_KEY"; exit 1; }
+          test -n "$PGP_PRIVATE_KEY" || { echo "Missing secret: PGP_PRIVATE_KEY"; exit 1; }
+          test -n "$MAIL_FROM" || { echo "Missing variable: MAIL_FROM"; exit 1; }
           gh auth status
+          gpg --version
+
+      - name: Read encrypted subscriber variable
+        env:
+          GH_TOKEN: ${{ secrets.VARS_PAT }}
+        run: |
+          umask 077
+          gh variable get SUBSCRIBERS_ENC --repo "$GITHUB_REPOSITORY" > subscribers.enc
 
       - name: Check Steam and send email
         env:
           STEAM_FREEBIE_STATE: ${{ vars.STEAM_FREEBIE_STATE }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ vars.SMTP_PORT || '465' }}
-          SMTP_USE_SSL: ${{ vars.SMTP_USE_SSL || 'true' }}
-          SMTP_STARTTLS: ${{ vars.SMTP_STARTTLS || 'false' }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          LIST_ENCRYPTION_KEY: ${{ secrets.LIST_ENCRYPTION_KEY }}
+          PGP_PRIVATE_KEY: ${{ secrets.PGP_PRIVATE_KEY }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
           MAIL_FROM: ${{ vars.MAIL_FROM }}
-          MAIL_TO: ${{ vars.MAIL_TO }}
-          STEAM_COOKIE: ${{ secrets.STEAM_COOKIE }}
-        run: python script.py --send-email
+        run: python script.py --send-email --subscriber-state-file subscribers.enc
 
       - name: Save current state to repository variable
         env:
-          GH_TOKEN: ${{ secrets.REPO_VARIABLE_TOKEN }}
+          GH_TOKEN: ${{ secrets.VARS_PAT }}
         run: gh variable set STEAM_FREEBIE_STATE --repo "$GITHUB_REPOSITORY" < steam_state.json

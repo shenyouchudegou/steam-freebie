@@ -1,0 +1,16 @@
+title: "[必填] Subscribe 或 Unsubscribe"
+labels: ["subscription"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📬 加密订阅 / 取消订阅
+        ⚠️ **正文只能包含一个 PGP 密文块**，请勿填写明文邮箱。
+        ⚠️ **取消订阅**必须使用订阅时的**同一个 GitHub 账户**发布。
+  - type: textarea
+    id: pgp_message
+    attributes:
+      label: PGP 密文
+      description: 粘贴以 -----BEGIN PGP MESSAGE----- 开头的完整密文，不要附加其他文字。
+    validations:
+      required: true

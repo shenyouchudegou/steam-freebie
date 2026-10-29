@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
-import smtplib
-import ssl
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -14,10 +12,14 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from subscriber_store import PGPDecryptor, decrypt_records, decrypt_subscriber_emails
+
 
 SEARCH_URL = "https://store.steampowered.com/search"
 DEFAULT_STATE_OUTPUT = Path("steam_state.json")
 MAX_PAGES = 10
+RESEND_BATCH_URL = "https://api.resend.com/emails/batch"
+RESEND_BATCH_SIZE = 100
 
 PARAMS = {
     "sort_by": "Price_ASC",
@@ -40,13 +42,6 @@ HEADERS = {
     ),
 }
 
-# 只保留公开页面所需的地区和时区设置，不在源码中保存会过期的会话 Cookie。
-COOKIES = {
-    "steamCountry": "US",
-    "timezoneOffset": "28800,0",
-    "timezoneName": "Asia/Shanghai",
-}
-
 
 def fetch_search_page(
     session: requests.Session, category_id: str, page: int
@@ -54,15 +49,12 @@ def fetch_search_page(
     """请求指定分类的一页 Steam 搜索结果。"""
     params = {**PARAMS, "category1": category_id, "page": str(page)}
     headers = HEADERS.copy()
-    cookie = os.environ.get("STEAM_COOKIE")
-    if cookie:
-        headers["Cookie"] = cookie
 
     response = session.get(
         SEARCH_URL,
         params=params,
         headers=headers,
-        cookies=None if cookie else COOKIES,
+        cookies=None,
         timeout=30,
     )
     response.raise_for_status()
@@ -234,28 +226,7 @@ def env_required(name: str) -> str:
     return value
 
 
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name} 必须是 true 或 false")
-
-
-def build_email(games: list[dict[str, Any]]) -> EmailMessage:
-    sender = os.environ.get("MAIL_FROM", "").strip() or env_required("SMTP_USERNAME")
-    recipients = [
-        address.strip()
-        for address in env_required("MAIL_TO").replace(";", ",").split(",")
-        if address.strip()
-    ]
-    if not recipients:
-        raise ValueError("MAIL_TO 中没有有效的收件地址")
-
+def build_email_content(games: list[dict[str, Any]]) -> tuple[str, str, str]:
     subject = f"Steam 喜加一：今日新增 {len(games)} 款免费内容"
     text_lines = [subject, ""]
     html_items: list[str] = []
@@ -270,43 +241,63 @@ def build_email(games: list[dict[str, Any]]) -> EmailMessage:
             f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a>'
             "</li>"
         )
-
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = sender
-    message["To"] = ", ".join(recipients)
-    message.set_content("\n\n".join(text_lines))
-    message.add_alternative(
+    html_body = (
         "<html><body>"
         f"<h2>{html.escape(subject)}</h2><ul>{''.join(html_items)}</ul>"
-        "</body></html>",
-        subtype="html",
+        "</body></html>"
     )
-    return message
+    return subject, "\n\n".join(text_lines), html_body
 
 
-def send_notification(games: list[dict[str, Any]]) -> None:
-    host = env_required("SMTP_HOST")
-    username = env_required("SMTP_USERNAME")
-    password = env_required("SMTP_PASSWORD")
-    port = int(os.environ.get("SMTP_PORT", "465"))
-    use_ssl = env_bool("SMTP_USE_SSL", port == 465)
-    use_starttls = env_bool("SMTP_STARTTLS", not use_ssl)
-    message = build_email(games)
-    context = ssl.create_default_context()
+def send_notification(games: list[dict[str, Any]], recipients: list[str]) -> None:
+    if not recipients:
+        print("订阅列表为空，跳过邮件")
+        return
 
-    if use_ssl:
-        with smtplib.SMTP_SSL(host, port, timeout=30, context=context) as server:
-            server.login(username, password)
-            server.send_message(message)
-    else:
-        with smtplib.SMTP(host, port, timeout=30) as server:
-            server.ehlo()
-            if use_starttls:
-                server.starttls(context=context)
-                server.ehlo()
-            server.login(username, password)
-            server.send_message(message)
+    api_key = env_required("RESEND_API_KEY")
+    sender = env_required("MAIL_FROM")
+    subject, text_body, html_body = build_email_content(games)
+
+    for batch_index, start in enumerate(
+        range(0, len(recipients), RESEND_BATCH_SIZE), start=1
+    ):
+        batch = recipients[start : start + RESEND_BATCH_SIZE]
+        payload = [
+            {
+                "from": sender,
+                "to": [recipient],
+                "subject": subject,
+                "text": text_body,
+                "html": html_body,
+            }
+            for recipient in batch
+        ]
+        payload_bytes = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        idempotency_key = "steam-freebie/" + hashlib.sha256(payload_bytes).hexdigest()
+        response = requests.post(
+            RESEND_BATCH_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Idempotency-Key": idempotency_key,
+            },
+            data=payload_bytes,
+            timeout=30,
+        )
+        response.raise_for_status()
+        print(f"Resend 批次 {batch_index} 已接受 {len(batch)} 封邮件")
+
+
+def load_recipients(state_path: Path) -> list[str]:
+    records = decrypt_records(
+        state_path.read_text(encoding="utf-8"), env_required("LIST_ENCRYPTION_KEY")
+    )
+    with PGPDecryptor(
+        env_required("PGP_PRIVATE_KEY"), os.environ.get("PGP_PASSPHRASE", "")
+    ) as decryptor:
+        return decrypt_subscriber_emails(records, decryptor)
 
 
 def append_job_summary(games: list[dict[str, Any]], new_games: list[dict[str, Any]]) -> None:
@@ -331,6 +322,12 @@ def main() -> None:
     parser.add_argument("--item-type", choices=CATEGORIES, default="game")
     parser.add_argument("--output", type=Path, default=Path("steam_games.json"))
     parser.add_argument("--state-output", type=Path, default=DEFAULT_STATE_OUTPUT)
+    parser.add_argument(
+        "--subscriber-state-file",
+        type=Path,
+        default=Path("subscribers.enc"),
+        help="从仓库变量下载的加密订阅列表",
+    )
     parser.add_argument("--send-email", action="store_true", help="有新增时发送邮件")
     args = parser.parse_args()
 
@@ -350,8 +347,9 @@ def main() -> None:
 
     print(f"当前共 {len(games)} 条，较上次新增 {len(new_games)} 条")
     if args.send_email and new_games:
-        send_notification(new_games)
-        print("新增内容邮件已发送")
+        recipients = load_recipients(args.subscriber_state_file)
+        send_notification(new_games, recipients)
+        print(f"新增内容通知处理完成，订阅地址数：{len(recipients)}")
     elif args.send_email:
         print("没有新增内容，跳过邮件")
     else:

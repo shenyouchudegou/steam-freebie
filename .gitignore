@@ -208,6 +208,10 @@ tempCodeRunnerFile.py
 # Local scraper output
 steam_games.json
 steam_state.json
+subscribers.enc
+subscribers-updated.enc
+subscription-response.md
+private.asc
 
 # Ruff stuff:
 .ruff_cache/
